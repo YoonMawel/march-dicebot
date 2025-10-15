@@ -308,10 +308,9 @@ class Sheets:
         ])
 
     def acquire_lock(self, c: int) -> bool:
-        # 현재 잠금 확인 후, 배치로 RUNNING 세팅
         from gspread.utils import rowcol_to_a1
-        cur = self._get_cell_value(self.ctrl_rmap[CTRL_LOCK], c).strip()
-        if cur:
+        cur = self._get_cell_value(self.ctrl_rmap[CTRL_LOCK], c).strip().upper()
+        if cur == "RUNNING":  # ← 정확히 RUNNING일 때만 잠금
             return False
         rng = rowcol_to_a1(self.ctrl_rmap[CTRL_LOCK], c)
         self.ws_ctrl.batch_update([{"range": rng, "values": [["RUNNING"]]}])
@@ -453,7 +452,8 @@ def main():
                 ctrl = sheets.read_ctrl_col(c)
 
                 # 이미 다른 인스턴스/프로세스가 잠금 중이면 건너뜀
-                if ctrl["lock"] and ctrl["lock"].strip():
+                lock_val = (ctrl.get("lock") or "").strip().upper()
+                if lock_val == "RUNNING":
                     any_running = True
                     continue
 
