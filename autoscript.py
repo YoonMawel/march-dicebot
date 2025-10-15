@@ -105,6 +105,9 @@ class Sheets:
         ]
         creds = Credentials.from_service_account_file(GOOGLE_SA_JSON, scopes=scopes)
         self.gc = gspread.authorize(creds)
+
+        self._rl = RateLimiter(permits_per_min=60)
+
         self.ss = self.gc.open_by_key(SHEET_KEY) if SHEET_KEY else self.gc.open(SHEET_NAME)
         self.ws_list = self.ss.worksheet(WS_LIST)
         self.ws_ctrl = self.ss.worksheet(WS_CTRL)
@@ -129,10 +132,12 @@ class Sheets:
 
         # 상태 캐시(같은 메시지 반복 쓰기 방지)
         self._last_status: Dict[int, str] = {}
-        self._rl = RateLimiter(permits_per_min=60)
 
     def _throttle(self):
-        w = self._rl.acquire()
+        rl = getattr(self, "_rl", None)
+        if rl is None:
+            return
+        w = rl.acquire()
         if w > 0:
             time.sleep(w)
 
