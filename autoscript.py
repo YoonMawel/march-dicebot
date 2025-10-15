@@ -17,7 +17,7 @@ from mastodon import Mastodon, MastodonAPIError, MastodonNetworkError
 
 # Mastodon
 MASTODON_BASE_URL = "https://marchen1210d.site"
-MASTODON_ACCESS_TOKEN = "OUmPOvDiWgLsSvmPdnLNM3tw4_LMrTPgYeEkNd8Qpmc"
+MASTODON_ACCESS_TOKEN = "Y_K7iQ_NgMR8OjtNPE03pgzkdUs97Qe7s6eOlEri7_o"
 
 # Google Service Account JSON
 GOOGLE_SA_JSON = "march-credential.json"
