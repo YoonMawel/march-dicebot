@@ -3,6 +3,7 @@ import time
 import logging
 from datetime import datetime
 from typing import Optional, Tuple, Dict, Any, List
+import threading
 
 import pytz
 import gspread
@@ -57,15 +58,44 @@ CTRL_LABELS_ORDER = [
 ]
 
 # 폴링 주기(읽기 빈도)
-POLL_SEC_WHEN_IDLE = 15   # 대기 중(아무 작업도 없을 때)
-POLL_SEC_WHEN_BUSY = 3    # 실행/직후 상태
+POLL_SEC_WHEN_IDLE = 25   # 대기 중(아무 작업도 없을 때)
+POLL_SEC_WHEN_BUSY = 7    # 실행/직후 상태
 
 # 적응형 슬립 상한(초): 예약까지 남은 시간이 길면 최대 이 시간만큼 잠듦
-ADAPTIVE_SLEEP_CEIL = 600  # 10분
+ADAPTIVE_SLEEP_CEIL = 1200  # 20분
 
 # =========================
 # 시트 클라이언트
 # =========================
+
+class RateLimiter:
+    """간단 토큰버킷: 분당 permits_per_min 회로 제한"""
+    def __init__(self, permits_per_min: int = 30):
+        self.rate = max(1, permits_per_min)
+        self.capacity = self.rate
+        self.tokens = self.capacity
+        self.lock = threading.Lock()
+        self.ts = time.time()
+
+    def _refill(self):
+        now = time.time()
+        elapsed = now - self.ts
+        # 초당 rate/60 만큼 토큰 보충
+        self.tokens = min(self.capacity, self.tokens + elapsed * (self.rate / 60.0))
+        self.ts = now
+
+    def acquire(self):
+        with self.lock:
+            self._refill()
+            if self.tokens >= 1.0:
+                self.tokens -= 1.0
+                return 0.0  # 대기 없음
+            # 부족하면 다음 토큰까지 대기 시간 계산
+            need = 1.0 - self.tokens
+            wait = need * (60.0 / self.rate)
+            self.tokens = 0.0
+            self.ts = time.time()
+            return wait
 
 class Sheets:
     def __init__(self):
@@ -80,7 +110,7 @@ class Sheets:
         self.ws_ctrl = self.ss.worksheet(WS_CTRL)
 
         # 출력목록: 1행 헤더 맵
-        header = [h.strip() for h in self.ws_list.row_values(1)]
+        header = [h.strip() for h in self._row_values(self.ws_list, 1)]
         self.hmap_list: Dict[str, int] = {h: i + 1 for i, h in enumerate(header)}  # 1-based
         required = [HDR_ORDER, HDR_TEXT, HDR_POSTED, HDR_POSTED_AT]
         miss = [h for h in required if h not in self.hmap_list]
@@ -99,11 +129,33 @@ class Sheets:
 
         # 상태 캐시(같은 메시지 반복 쓰기 방지)
         self._last_status: Dict[int, str] = {}
+        self._rl = RateLimiter(permits_per_min=60)
+
+    def _throttle(self):
+        w = self._rl.acquire()
+        if w > 0:
+            time.sleep(w)
+
+    def _row_values(self, ws, row_idx: int):
+        self._throttle()
+        return ws.row_values(row_idx)
+
+    def _batch_get(self, ws, ranges, major_dimension='ROWS'):
+        self._throttle()
+        return ws.batch_get(ranges, major_dimension=major_dimension)
+
+    def _get_values(self, ws, rng: str):
+        self._throttle()
+        return ws.get_values(rng)
+
+    def _cell(self, ws, r: int, c: int):
+        self._throttle()
+        return ws.cell(r, c)
 
     # ---------- 출력목록 ----------
     def _list_values(self) -> List[List[str]]:
         # 헤더 포함 A~E만 (E: 스크립트ID 선택용)
-        return self.ws_list.get_values('A1:E')
+        return self._get_values(self.ws_list, 'A1:E')
 
     def get_next_unposted(self, script_id: Optional[str]) -> Optional[Tuple[int, str]]:
         values = self._list_values()
@@ -171,14 +223,14 @@ class Sheets:
         # 최소 호출로 유효 열 판단 (batch_get 사용)
         from gspread.utils import rowcol_to_a1
         r_vis = self.ctrl_rmap[CTRL_VIS]
-        vis_row = self.ws_ctrl.row_values(r_vis)  # 1회 읽기
+        vis_row = self._row_values(self.ws_ctrl, r_vis)  # 1회 읽기
         last = max(2, len(vis_row))
         ranges = [
             f"{rowcol_to_a1(self.ctrl_rmap[CTRL_ACTIVE], 2)}:{rowcol_to_a1(self.ctrl_rmap[CTRL_ACTIVE], last)}",
             f"{rowcol_to_a1(self.ctrl_rmap[CTRL_CHECK], 2)}:{rowcol_to_a1(self.ctrl_rmap[CTRL_CHECK], last)}",
             f"{rowcol_to_a1(self.ctrl_rmap[CTRL_INTERVAL], 2)}:{rowcol_to_a1(self.ctrl_rmap[CTRL_INTERVAL], last)}",
         ]
-        blocks = self.ws_ctrl.batch_get(ranges, major_dimension='ROWS')  # 3회 읽기
+        blocks = self._batch_get(self.ws_ctrl, ranges, major_dimension='ROWS')  # 3회 읽기
         act_row   = blocks[0][0] if blocks and blocks[0] else []
         check_row = blocks[1][0] if len(blocks) > 1 and blocks[1] else []
         itv_row   = blocks[2][0] if len(blocks) > 2 and blocks[2] else []
@@ -194,13 +246,13 @@ class Sheets:
         return cols
 
     def _get_cell_value(self, r: int, c: int) -> str:
-        v = self.ws_ctrl.cell(r, c).value
+        v = self._cell(self.ws_ctrl, r, c).value
         return (v or "")
 
     def read_ctrl_col(self, c: int) -> Dict[str, Any]:
         from gspread.utils import rowcol_to_a1
         ranges = [rowcol_to_a1(self.ctrl_rmap[label], c) for label in CTRL_LABELS_ORDER]
-        vals = self.ws_ctrl.batch_get(ranges, major_dimension='ROWS')  # 각 항목이 [['값']] 형태
+        vals = self._batch_get(self.ws_ctrl, ranges, major_dimension='ROWS')  # 각 항목이 [['값']] 형태
 
         def first_cell(range_rows) -> str:
             """batch_get 반환(리스트의 리스트)에서 첫 셀을 문자열로 안전 추출"""
@@ -370,6 +422,7 @@ def run_job_for_col(api: Mastodon, sheets: Sheets, c: int, ctrl: Dict[str, Any])
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    time.sleep(5)
 
     if not MASTODON_BASE_URL or not MASTODON_ACCESS_TOKEN:
         raise RuntimeError("MASTODON_BASE_URL / MASTODON_ACCESS_TOKEN 설정 필요")
@@ -380,6 +433,7 @@ def main():
     api = create_masto()
 
     logging.info("세로 레이아웃 컨트롤 모드: A열 라벨, B열부터 작업 열을 스캔합니다.")
+
     backoff = 10  # Sheets API 오류 시 지수 백오프 시작값(초)
 
     while True:
