@@ -125,7 +125,17 @@ class DiceListener(StreamListener):
 
                 # 러너 로드 & 닉네임 정책 (유저행 추가/갱신이 있을 수 있어 유저락)
                 with self.sheets.lock_for(acct):
-                    row_idx, runner = self.sheets.get_runner_row(acct)
+                    # ▶ get_runner_row()가 None을 리턴하는 예외 상황을 대비해 가드를 둡니다.
+                    res = self.sheets.get_runner_row(acct)
+                    if not isinstance(res, tuple) or len(res) != 2:
+                        logging.error("get_runner_row() returned %r for acct=%s", res, acct)
+                        # 사용자에게도 '내부 오류' 한 줄 공지(봇이 죽지 않게)
+                        reply_to = (status.get("id") if status else None)
+                        acct_tag = f"@{acct} " if acct else ""
+                        self._enqueue(acct, reply_to, f"{acct_tag}내부 오류(get_runner_row).")
+                        return
+
+                    row_idx, runner = res
                     self._maybe_update_nickname(status, row_idx, runner)
 
                 # 1) NdM(+/-K) 선처리
@@ -205,11 +215,15 @@ class DiceListener(StreamListener):
         return root
 
     def _is_allowed_reply(self, status: dict, purpose: str) -> tuple[bool, dict]:
-        conf = self.sheets.get_config()
+        """
+        항상 (allowed, root_status) 튜플을 반환하도록 보장
+        """
         root = self._get_thread_root(status)
+        conf = self.sheets.get_config()
 
         explicit_id_key = "출석_허용_상태ID" if purpose == "출석" else "확인_허용_상태ID"
         explicit_id = (conf.get(explicit_id_key) or "").strip()
+
         if explicit_id and explicit_id != "0":
             if str(status.get("in_reply_to_id") or "") == explicit_id:
                 return True, root
@@ -227,6 +241,6 @@ class DiceListener(StreamListener):
         root_text = html_to_text(root.get("content", "") or "")
 
         acct_ok = (not allowed_accounts) or (root_acct in allowed_accounts)
-        kw_ok   = (not kw) or (kw in root_text)
+        kw_ok = (not kw) or (kw in root_text)
 
         return (acct_ok and kw_ok), root

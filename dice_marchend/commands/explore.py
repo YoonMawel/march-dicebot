@@ -63,12 +63,10 @@ def _apply_reward_uniform(cfg_node, sheets: Sheets, handle: str, currency_key: s
         return base, False
 
     # rumor
-    if t == "item":
-        item, qty = cfg_node["item"], cfg_node["qty"]
-        if item and qty > 0:
-            sheets.add_item(handle, item, qty)
-            return f"{base}\n획득: {item} x{qty}", True
-        return base, False
+    rumor = cfg_node.get("rumor") or ""
+    if rumor:
+        return f"{base}\n소문: {rumor}", True  # 소문도 소진으로 처리하려면 True
+    return base, False
 
 def handle(acct: str, raw_path: str, sheets: Sheets, cfg: Config) -> str:
     """
@@ -78,11 +76,17 @@ def handle(acct: str, raw_path: str, sheets: Sheets, cfg: Config) -> str:
     - 선택지는 불릿 리스트로 출력
     - 가시적 보상(갈레온/아이템) 지급 시 '[보상 처리]' 라벨을 붙임
     """
+
+    res = sheets.get_session_row(acct)
+    if not isinstance(res, tuple) or len(res) != 2:
+        # 세션 함수가 None 등 잘못된 값을 주면 바로 명확히 터뜨려서 원인 파악
+        raise RuntimeError(f"get_session_row invalid return: {res!r}")
+    sess_row, cur_path = res
+
     conf = sheets.get_config()
     currency_key = conf.get("통화키", "갈레온")
 
     # 현재 세션 경로 불러오기
-    sess_row, cur_path = sheets.get_session_row(acct)
     cur_path = normalize_path(cur_path)
     token = (raw_path or "").strip()
 
