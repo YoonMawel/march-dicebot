@@ -44,23 +44,31 @@ def _apply_reward_uniform(cfg_node, sheets: Sheets, handle: str, currency_key: s
     base = cfg_node["place"] or ""
     t = _choose_type_uniform(cfg_node)
     if not t:
-        return (base or "아무 일도 일어나지 않았다.", False)
+        return base, False
 
     if t == "coin":
-        lo = max(0, cfg_node["gmin"])
+        lo = max(0, cfg_node["gmin"]);
         hi = max(lo, cfg_node["gmax"])
         amt = random.randint(lo, hi) if hi > 0 else 0
         if amt > 0:
             sheets.add_currency(handle, amt)
-        return (f"{base}\n획득: {currency_key} +{amt}", True)
+            return f"{base}\n획득: {currency_key} +{amt}", True
+        return base, False
 
     if t == "item":
         item, qty = cfg_node["item"], cfg_node["qty"]
-        sheets.add_item(handle, item, qty)
-        return (f"{base}\n획득: {item} x{qty}", True)
+        if item and qty > 0:
+            sheets.add_item(handle, item, qty)
+            return f"{base}\n획득: {item} x{qty}", True
+        return base, False
 
     # rumor
-    return (f"{base}\n소문: {cfg_node['rumor']}", False)
+    if t == "item":
+        item, qty = cfg_node["item"], cfg_node["qty"]
+        if item and qty > 0:
+            sheets.add_item(handle, item, qty)
+            return f"{base}\n획득: {item} x{qty}", True
+        return base, False
 
 def handle(acct: str, raw_path: str, sheets: Sheets, cfg: Config) -> str:
     """
@@ -121,12 +129,10 @@ def handle(acct: str, raw_path: str, sheets: Sheets, cfg: Config) -> str:
         if not cfg_node:
             return f"해당 구역에는 설정 행이 없습니다: {node}"
 
-        text, paid = _apply_reward_uniform(cfg_node, sheets, acct, currency_key)
-        if paid:
-            text = f"\n{text}"
+        text, consumed = _apply_reward_uniform(cfg_node, sheets, acct, currency_key)
 
-        # 성공 시에만 카운트 증가
-        sheets.inc_today_limit(acct)
+        if consumed:
+            sheets.inc_today_limit(acct)
 
     # 락 밖에서 자식 선택지/세션 경로 갱신(필요 시 아래 두 줄도 락 안으로 옮겨도 OK)
     children = sheets.list_children(node)
